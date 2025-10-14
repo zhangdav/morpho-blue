@@ -21,3 +21,6 @@ lib/
 
 # Dotfiles
 .DS_Store
+
+# VSCode
+.vscode/

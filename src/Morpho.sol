@@ -41,6 +41,7 @@ contract Morpho is IMorphoStaticTyping {
     mapping(Id => Market) public market;
     mapping(address => mapping(address => bool)) public isAuthorized;
     mapping(address => uint256) public nonce;
+    mapping(Id => MarketParams) public idToMarketParams;
 
     constructor(address newOwner) {
         require(newOwner != address(0), ErrorsLib.ZERO_ADDRESS);
@@ -103,6 +104,20 @@ contract Morpho is IMorphoStaticTyping {
         emit EventsLib.SetFeeRecipient(newFeeRecipient);
     }
 
+    function createMarket(MarketParams memory marketParams) external {
+        Id id = marketParams.id();
+        require(isIrmEnabled[marketParams.irm], ErrorsLib.IRM_NOT_ENABLED);
+        require(isLltvEnabled[marketParams.lltv], ErrorsLib.LLTV_NOT_ENABLED);
+        require(market[id].lastUpdate == 0, ErrorsLib.MARKET_ALREADY_CREATED);
+
+        market[id].lastUpdate = uint128(block.timestamp);
+        idToMarketParams[id] = marketParams;
+
+        emit EventsLib.CreateMarket(id, marketParams);
+
+        if (marketParams.irm != address(0)) IIrm(marketParams.irm).borrowRate(marketParams, market[id]);
+    }
+
     function setAuthorization(address authorized, bool newIsAuthorized) external {
         require(newIsAuthorized != isAuthorized[msg.sender][authorized], ErrorsLib.ALREADY_SET);
 
@@ -127,4 +142,6 @@ contract Morpho is IMorphoStaticTyping {
 
         emit EventsLib.SetAuthorization(msg.sender, authorization.authorizer, authorization.authorized, authorization.isAuthorized);
     }
+
+    function _accrueInterest(MarketParams memory marketParams, Id id) internal {}
 }
