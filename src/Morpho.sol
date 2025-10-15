@@ -221,6 +221,148 @@ contract Morpho is IMorphoStaticTyping {
         return (assets, shares);
     }
 
+    function repay(
+        MarketParams memory marketParams,
+        uint256 assets,
+        uint256 shares,
+        address onBehalf,
+        bytes calldata data 
+    ) external returns (uint256, uint256) {
+        Id id = marketParams.id();
+        require(market[id].lastUpdate != 0, ErrorsLib.MARKET_NOT_CREATED);
+        require(UtilsLib.exactlyOneZero(assets, shares), ErrorsLib.INCONSISTENT_INPUT);
+        require(onBehalf != address(0), ErrorsLib.ZERO_ADDRESS);
+
+        _accrueInterest(marketParams, id);
+
+        if (assets > 0) shares = assets.toSharesDown(market[id].totalBorrowAssets, market[id].totalBorrowShares);
+        else assets = shares.toAssetsUp(market[id].totalBorrowAssets, market[id].totalBorrowShares);
+
+        position[id][onBehalf].borrowShares -= shares.toUint128();
+        market[id].totalBorrowShares -= shares.toUint128();
+        market[id].totalBorrowAssets = UtilsLib.zeroFloorSub(market[id].totalBorrowAssets, assets).toUint128();
+
+        emit EventsLib.Repay(id, msg.sender, onBehalf, assets, shares);
+
+        if (data.length > 0) IMorphoRepayCallback(msg.sender).onMorphoRepay(assets, data);
+
+        IERC20(marketParams.loanToken).safeTransferFrom(msg.sender, address(this), assets);
+
+        return (assets, shares);
+    }
+
+    function supplyCollateral(MarketParams memory marketParams, uint256 assets, address onBehalf, bytes calldata data)
+        external
+    {
+        Id id = marketParams.id();
+        require(market[id].lastUpdate != 0, ErrorsLib.MARKET_NOT_CREATED);
+        require(assets != 0, ErrorsLib.ZERO_ASSETS);
+        require(onBehalf != address(0), ErrorsLib.ZERO_ADDRESS);
+
+        position[id][onBehalf].collateral += assets.toUint128();
+
+        emit EventsLib.SupplyCollateral(id, msg.sender, onBehalf, assets);
+
+        if (data.length > 0) IMorphoSupplyCollateralCallback(msg.sender).onMorphoSupplyCollateral(assets, data);
+
+        IERC20(marketParams.collateralToken).safeTransferFrom(msg.sender, address(this), assets);
+    }
+
+    function withdrawCollateral(MarketParams memory marketParams, uint256 assets, address onBehalf, address receiver)
+        external
+    {
+        Id id = marketParams.id();
+        require(market[id].lastUpdate != 0, ErrorsLib.MARKET_NOT_CREATED);
+        require(assets != 0, ErrorsLib.ZERO_ASSETS);
+        require(receiver != address(0), ErrorsLib.ZERO_ADDRESS);
+        require(_isSenderAuthorized(onBehalf), ErrorsLib.UNAUTHORIZED);
+
+        _accrueInterest(marketParams, id);
+
+        position[id][onBehalf].collateral -= assets.toUint128();
+
+        require(_isHealthy(marketParams, id, onBehalf), ErrorsLib.INSUFFICIENT_COLLATERAL);
+
+        emit EventsLib.WithdrawCollateral(id, msg.sender, onBehalf, receiver, assets);
+
+        IERC20(marketParams.collateralToken).safeTransfer(receiver, assets);
+    }
+
+    function liquidate(
+        MarketParams memory marketParams,
+        address borrower,
+        uint256 seizedAssets,
+        uint256 repaidShares,
+        bytes calldata data
+    ) external returns (uint256, uint256) {
+        Id id = marketParams.id();
+        require(market[id].lastUpdate != 0, ErrorsLib.MARKET_NOT_CREATED);
+        require(UtilsLib.exactlyOneZero(seizedAssets, repaidShares), ErrorsLib.INCONSISTENT_INPUT);
+
+        _accrueInterest(marketParams, id);
+
+        {
+            uint256 collateralPrice = IOracle(marketParams.oracle).price();
+
+            require(!_isHealthy(marketParams, id, borrower, collateralPrice), ErrorsLib.HEALTHY_POSITION);
+
+            uint256 liquidationIncentiveFactor = UtilsLib.min(
+                MAX_LIQUIDATION_INCENTIVE_FACTOR,
+                WAD.wDivDown(WAD - LIQUIDATION_CURSOR.wMulDown(WAD - marketParams.lltv))
+            );
+
+            if (seizedAssets > 0) {
+                uint256 seizedAssetsQuoted = seizedAssets.mulDivDown(collateralPrice, ORACLE_PRICE_SCALE);
+
+                repaidShares = seizedAssetsQuoted.wDivUp(liquidationIncentiveFactor).toSharesUp(
+                    market[id].totalBorrowAssets, market[id].totalBorrowShares
+                );
+            } else {
+                seizedAssets = repaidShares.toAssetsDown(market[id].totalBorrowAssets, market[id].totalBorrowShares)
+                    .wMulDown(liquidationIncentiveFactor).mulDivDown(ORACLE_PRICE_SCALE, collateralPrice);
+            }
+        }
+        uint256 repaidAssets = repaidShares.toAssetsUp(market[id].totalBorrowAssets, market[id].totalBorrowShares);
+
+        position[id][borrower].borrowShares -= repaidShares.toUint128();
+        market[id].totalBorrowShares -= repaidShares.toUint128();
+        market[id].totalBorrowAssets = UtilsLib.zeroFloorSub(market[id].totalBorrowAssets, repaidAssets).toUint128();
+
+        position[id][borrower].collateral = seizedAssets.toUint128();
+
+        uint256 badDebtShares;
+        uint256 badDebtAssets;
+        if (position[id][borrower].borrowShares == 0) {
+            badDebtShares = position[id][borrower].borrowShares;
+            badDebtAssets = UtilsLib.min(market[id].totalBorrowAssets, badDebtShares.toAssetsUp(market[id].totalBorrowAssets, market[id].totalBorrowShares));
+
+            market[id].totalBorrowAssets -= badDebtAssets.toUint128();
+            market[id].totalSupplyAssets -= badDebtAssets.toUint128();
+            market[id].totalBorrowShares -= badDebtShares.toUint128();
+            position[id][borrower].borrowShares = 0;
+        }
+
+        IERC20(marketParams.collateralToken).safeTransfer(msg.sender, seizedAssets);
+
+        if (data.length > 0) IMorphoLiquidateCallback(msg.sender).onMorphoLiquidate(repaidAssets, data);
+
+        IERC20(marketParams.loanToken).safeTransferFrom(msg.sender, address(this), repaidAssets);
+
+        return (seizedAssets, repaidAssets);
+    }
+
+    function flashLoan(address token, uint256 assets, bytes calldata data) external {
+        require(assets != 0, ErrorsLib.ZERO_ASSETS);
+
+        emit EventsLib.FlashLoan(msg.sender, token, assets);
+
+        IERC20(token).safeTransfer(msg.sender, assets);
+
+        IMorphoFlashLoanCallback(msg.sender).onMorphoFlashLoan(assets, data);
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), assets);
+    }
+
     function setAuthorization(address authorized, bool newIsAuthorized) external {
         require(newIsAuthorized != isAuthorized[msg.sender][authorized], ErrorsLib.ALREADY_SET);
 
