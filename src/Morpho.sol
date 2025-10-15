@@ -27,8 +27,14 @@ import {EventsLib} from "./libraries/EventsLib.sol";
 import "./libraries/ConstantsLib.sol";
 import {MathLib, WAD} from "./libraries/MathLib.sol";
 import {MarketParamsLib} from "./libraries/MarketParamsLib.sol";
+import {UtilsLib} from "./libraries/UtilsLib.sol";
+import {SharesMathLib} from "./libraries/SharesMathLib.sol";
 
 contract Morpho is IMorphoStaticTyping {
+    using MathLib for uint128;
+    using MathLib for uint256;
+    using UtilsLib for uint256;
+    using SharesMathLib for uint256;
     using MarketParamsLib for MarketParams;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
@@ -42,6 +48,7 @@ contract Morpho is IMorphoStaticTyping {
     mapping(address => mapping(address => bool)) public isAuthorized;
     mapping(address => uint256) public nonce;
     mapping(Id => MarketParams) public idToMarketParams;
+    mapping(Id => mapping(address => Position)) public position;
 
     constructor(address newOwner) {
         require(newOwner != address(0), ErrorsLib.ZERO_ADDRESS);
@@ -143,5 +150,28 @@ contract Morpho is IMorphoStaticTyping {
         emit EventsLib.SetAuthorization(msg.sender, authorization.authorizer, authorization.authorized, authorization.isAuthorized);
     }
 
-    function _accrueInterest(MarketParams memory marketParams, Id id) internal {}
+    function _accrueInterest(MarketParams memory marketParams, Id id) internal {
+        uint256 elapsed = block.timestamp - market[id].lastUpdate;
+        if (elapsed == 0) return;
+
+        if (marketParams.irm != address(0)) {
+            uint256 borrowRate = IIrm(marketParams.irm).borrowRate(marketParams, market[id]);
+            uint256 interest = market[id].totalBorrowAssets.wMulDown(borrowRate.wTaylorCompounded(elapsed));
+            market[id].totalBorrowAssets += interest.toUint128();
+            market[id].totalSupplyAssets += interest.toUint128();
+
+            uint256 feeShares;
+            if (market[id].fee != 0) {
+                uint256 feeAmount = interest.wMulDown(market[id].fee);
+                // newShares = assets * (totalShares / totalAssets)
+                feeShares = feeAmount.toSharesDown(market[id].totalSupplyAssets - feeAmount, market[id].totalSupplyShares);
+                position[id][feeRecipient].supplyShares += feeShares;
+                market[id].totalSupplyShares += feeShares.toUint128();
+            }
+
+            emit EventsLib.AccrueInterest(id, borrowRate, interest, feeShares);
+        }
+
+        market[id].lastUpdate = uint128(block.timestamp);
+    }
 }
