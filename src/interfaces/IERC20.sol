@@ -1,9 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity >=0.5.0;
+pragma solidity ^0.8.0;
 
-/// @title IERC20
-/// @author Morpho Labs
-/// @custom:contact security@morpho.org
-/// @dev Empty because we only call library functions. It prevents calling transfer (transferFrom) instead of
-/// safeTransfer (safeTransferFrom).
-interface IERC20 {}
+interface IERC20 {
+    /* EVENTS */
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /* FUNCTIONS */
+
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address account) external view returns (uint256);
+
+    function transfer(address to, uint256 value) external returns (bool);
+
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    function approve(address spender, uint256 value) external returns (bool);
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+}

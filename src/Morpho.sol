@@ -43,14 +43,13 @@ contract Morpho is IMorphoStaticTyping {
 
     address public owner;
     address public feeRecipient;
-
+    mapping(Id => mapping(address => Position)) public position;
+    mapping(Id => Market) public market;
     mapping(address => bool) public isIrmEnabled;
     mapping(uint256 => bool) public isLltvEnabled;
-    mapping(Id => Market) public market;
     mapping(address => mapping(address => bool)) public isAuthorized;
     mapping(address => uint256) public nonce;
     mapping(Id => MarketParams) public idToMarketParams;
-    mapping(Id => mapping(address => Position)) public position;
 
     constructor(address newOwner) {
         require(newOwner != address(0), ErrorsLib.ZERO_ADDRESS);
@@ -444,5 +443,19 @@ contract Morpho is IMorphoStaticTyping {
             .wMulDown(marketParams.lltv);
 
         return maxBorrow >= borrowed;
+    }
+
+    function extSloads(bytes32[] calldata slots) external view returns (bytes32[] memory res) {
+        uint256 nSlots = slots.length;
+
+        res = new bytes32[](nSlots);
+
+        for (uint256 i; i < nSlots;) {
+            bytes32 slot = slots[i++];
+
+            assembly ("memory-safe") {
+                mstore(add(res, mul(i, 32)), sload(slot))
+            }
+        }
     }
 }
